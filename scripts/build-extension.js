@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Builds the Chrome Web Store edition into dist/extension and packs it as
-// dist/browser-agent-extension.zip. The bundle is not minified, so reviewers can read it.
+// Builds the extension into dist/extension and packs it as dist/browser-agent-extension.zip.
+// The bundle is not minified, so reviewers can read it.
 
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
@@ -13,24 +13,15 @@ const OUT = join(ROOT, "dist", "extension");
 const ZIP = join(ROOT, "dist", "browser-agent-extension.zip");
 const { version } = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 
-// Model provider APIs the extension calls with the user's key. Ollama runs locally.
-const PROVIDER_HOSTS = [
-  "https://api.anthropic.com/*",
-  "https://api.openai.com/*",
-  "https://generativelanguage.googleapis.com/*",
-  "https://api.mistral.ai/*",
-  "http://127.0.0.1/*",
-  "http://localhost/*",
-];
-
 const manifest = {
   manifest_version: 3,
   name: "Browser Agent",
   version,
   description: "An AI agent that does tasks in your browser tabs, using your own API key.",
   minimum_chrome_version: "120",
-  permissions: ["sidePanel", "debugger", "tabs", "tabGroups", "storage"],
-  host_permissions: PROVIDER_HOSTS,
+  permissions: ["sidePanel", "scripting", "tabs", "tabGroups", "storage"],
+  // Pages: scripting and screenshots in the agent's tabs. Also covers the provider APIs.
+  host_permissions: ["<all_urls>"],
   background: { service_worker: "background.js" },
   side_panel: { default_path: "sidepanel.html" },
   action: { default_title: "Browser Agent", default_icon: { 16: "icon-16.png", 32: "icon-32.png" } },

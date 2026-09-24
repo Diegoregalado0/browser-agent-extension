@@ -43,16 +43,13 @@ const SCAN_SCHEMA = {
 };
 
 const READ_ONLY_BROWSER_ACTIONS = new Set(["screenshot", "hover", "scroll", "wait"]);
-const READ_ONLY_DESKTOP_ACTIONS = new Set(["screenshot", "move", "scroll", "focus_browser"]);
-const SCANNED_TOOLS = new Set(["read_page", "get_page_text", "find", "javascript_exec", "browser", "network_requests", "edit_html"]);
+const SCANNED_TOOLS = new Set(["read_page", "get_page_text", "find", "browser"]);
 const SCAN_MAX_CHARS = 60000;
 
 export function isStateChanging(name, input) {
   if (name === "browser") return !READ_ONLY_BROWSER_ACTIONS.has(input.action);
-  if (name === "desktop") return !READ_ONLY_DESKTOP_ACTIONS.has(input.action);
   if (name === "tabs") return input.action !== "list" && input.action !== "switch";
-  if (name === "edit_html") return input.html !== undefined;
-  return ["navigate", "form_input", "javascript_exec"].includes(name);
+  return ["navigate", "form_input"].includes(name);
 }
 
 async function sha256(text) {
@@ -61,10 +58,8 @@ async function sha256(text) {
 }
 
 export class Guard {
-  // env: environment variables that may hold API keys (none in the extension edition).
   // onUsage(tokens): tokens each check used, counted toward the usage limits.
-  constructor({ env = {}, onUsage = () => {} } = {}) {
-    this.env = env;
+  constructor({ onUsage = () => {} } = {}) {
     this.onUsage = onUsage;
     this.scanned = new Map();
     this.flags = [];
@@ -78,7 +73,7 @@ export class Guard {
   #resolve(config) {
     const provider = config.provider;
     const model = config.guardModels?.[provider] || DEFAULT_GUARD_MODELS[provider] || config.models[provider];
-    return { impl: providers[provider], provider, model, apiKey: apiKeyFor(config, provider, this.env) };
+    return { impl: providers[provider], provider, model, apiKey: apiKeyFor(config, provider) };
   }
 
   async #classify(config, args, signal) {
@@ -104,7 +99,6 @@ export class Guard {
       `Proposed action: ${name} ${JSON.stringify(input)}`,
     ];
     if (target) lines.push(`The action targets: ${target}`);
-    if (name === "desktop") lines.push("This is an OS-level action outside the page; its exact target cannot be verified.");
     if (this.flags.length) {
       lines.push("", "Content the agent read earlier was flagged as a possible prompt injection:");
       for (const f of this.flags.slice(-3)) lines.push(`- ${f}`);

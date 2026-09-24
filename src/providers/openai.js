@@ -66,8 +66,8 @@ function toMessages(system, messages) {
   return out;
 }
 
-// dangerouslyAllowBrowser: in the extension edition the user's own key calls the API
-// from their browser, which the SDK allows only with this opt-in.
+// dangerouslyAllowBrowser: the user's own key calls the API from their browser, which the
+// SDK allows only with this opt-in.
 function client({ apiKey, config }) {
   return new OpenAI({ apiKey, baseURL: config.openaiBaseUrl || undefined, dangerouslyAllowBrowser: true });
 }

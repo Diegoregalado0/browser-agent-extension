@@ -48,7 +48,6 @@
       <button data-settings-page="safety" data-icon="shield"><span>Permissions and safety</span></button>
       <button data-settings-page="browser" data-icon="window"><span>Browser</span></button>
       <button data-settings-page="data" data-icon="lock"><span>Data and privacy</span></button>
-      <button id="show-browser" data-icon="window" data-local-only><span>Show the agent browser</span></button>
     </nav>
     <section class="menu-bottom" aria-label="Sessions">
       <div class="menu-label">Sessions</div>
@@ -179,8 +178,7 @@
           </div>
 
           <h3 class="group-label">API keys and endpoints</h3>
-          <p class="group-desc" data-local-only>Keys are stored in ~/.browser-agent/config.json, readable only by you. When none is saved here, a key from the environment or the project's .env file is used.</p>
-          <p class="group-desc" data-extension-only>You use your own API key. It is stored only in this browser profile, never synced, and sent only to the provider it belongs to. Usage is billed to your account with that provider.</p>
+          <p class="group-desc">You use your own API key. It is stored only in this browser profile, never synced, and sent only to the provider it belongs to. Usage is billed to your account with that provider.</p>
           <div id="provider-cards"></div>
         </section>
 
@@ -271,38 +269,10 @@
             </div>
           </div>
 
-          <h3 class="group-label">Developer tools</h3>
-          <div class="setting-group">
-            <div class="setting">
-              <div class="setting-text">
-                <label class="setting-title" for="developerTools">Let the agent run JavaScript and edit page HTML</label>
-                <p class="setting-desc">Useful for debugging pages. Code runs with your signed-in access to the page, so leave this off unless you need it.</p>
-              </div>
-              <input id="developerTools" type="checkbox" role="switch" class="switch" data-setting="developerTools" />
-            </div>
-          </div>
-
           <h3 class="group-label">Sites you always allow</h3>
           <p class="group-desc">In "ask for each new site" mode, these sites never prompt. Add one by choosing "Always allow site" when asked.</p>
           <div class="setting-group" id="origins"></div>
 
-          <h3 class="group-label" data-local-only>Desktop control</h3>
-          <div class="setting-group" data-local-only>
-            <div class="setting">
-              <div class="setting-text">
-                <label class="setting-title" for="desktopControl">Let the agent use the mouse, keyboard, and screen</label>
-                <p class="setting-desc">For what page tools cannot reach: browser menus, extension popups, DevTools, permission prompts, and native dialogs. Clicks inside this panel are always refused.</p>
-              </div>
-              <input id="desktopControl" type="checkbox" role="switch" class="switch" data-setting="desktopControl" />
-            </div>
-            <div class="setting">
-              <div class="setting-text">
-                <span class="setting-title">macOS permissions</span>
-                <p class="setting-desc" id="desktop-status">Checking…</p>
-              </div>
-              <button id="grant-desktop" type="button">Request</button>
-            </div>
-          </div>
         </section>
 
         <section class="settings-page" data-page="browser" data-title="Browser" hidden>
@@ -322,17 +292,6 @@
               <input id="skipYoutubeAds" type="checkbox" role="switch" class="switch" data-setting="skipYoutubeAds" />
             </div>
           </div>
-
-          <h3 class="group-label" data-local-only>Agent browser</h3>
-          <div class="setting-group" data-local-only>
-            <div class="setting">
-              <div class="setting-text">
-                <span class="setting-title">Show the agent browser</span>
-                <p class="setting-desc">Brings the agent's Chrome window to the front. It uses its own profile; sign in to sites and install extensions there once and they persist.</p>
-              </div>
-              <button id="settings-show-browser" type="button">Show</button>
-            </div>
-          </div>
         </section>
 
         <section class="settings-page" data-page="data" data-title="Data and privacy" hidden>
@@ -340,7 +299,7 @@
             <div class="setting">
               <div class="setting-text">
                 <label class="setting-title" for="ghostMode">Ghost mode</label>
-                <p class="setting-desc">Sessions are not saved and nothing is written to the activity log. Switching starts a new session. Chrome still keeps its own browsing history.</p>
+                <p class="setting-desc">Sessions are not saved. Switching starts a new session. Chrome still keeps its own browsing history.</p>
                 <p class="setting-desc locked-note" id="ghost-locked-note" hidden>Ghost mode is on during incognito mode</p>
               </div>
               <input id="ghostMode" type="checkbox" role="switch" class="switch" />
@@ -352,22 +311,9 @@
             <div class="setting">
               <div class="setting-text">
                 <span class="setting-title">Saved sessions</span>
-                <p class="setting-desc"><span id="sessions-count">…</span><span data-local-only> in <span class="path" data-path="sessions"></span></span><span data-extension-only>, kept only in this browser profile</span>. Screenshots are not saved.</p>
+                <p class="setting-desc"><span id="sessions-count">…</span>, kept only in this browser profile. Screenshots are not saved.</p>
               </div>
               <button id="delete-all-sessions" type="button" class="danger-outline">Delete all</button>
-            </div>
-            <div class="setting" data-local-only>
-              <div class="setting-text">
-                <span class="setting-title">Activity log</span>
-                <p class="setting-desc">Tasks, actions, and safety-check decisions (<span id="activity-size">…</span>), shown by <code>browser-agent activity</code>.</p>
-              </div>
-              <button id="clear-activity" type="button" class="danger-outline">Clear</button>
-            </div>
-            <div class="setting" data-local-only>
-              <div class="setting-text">
-                <span class="setting-title">Data folder</span>
-                <p class="setting-desc"><span class="path" data-path=""></span> holds settings, history, the log, and the agent's Chrome profile.</p>
-              </div>
             </div>
           </div>
         </section>

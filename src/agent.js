@@ -7,10 +7,6 @@ import { RateLimiter, isSensitiveSite, sleep } from "./limits.js";
 import { passwordTargetScript } from "./page-scripts.js";
 import { CURRENT_TAB_TAG } from "./session-format.js";
 
-// Tools that run code or rewrite pages where the user is signed in; off unless the
-// developer tools setting is on.
-const DEVELOPER_TOOLS = new Set(["javascript_exec", "edit_html"]);
-
 const formatTokens = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
 // Conversation history is provider-neutral:
@@ -44,8 +40,6 @@ function describeInput(name, input) {
   if (input.action) return [input.action, input.text && `"${input.text.slice(0, 60)}"`].filter(Boolean).join(" ");
   if (name === "navigate") return `to ${input.url}`;
   if (name === "form_input") return `= ${JSON.stringify(input.value).slice(0, 60)}`;
-  if (name === "javascript_exec") return `"${input.code.slice(0, 80)}"`;
-  if (name === "edit_html") return `${input.ref || input.selector}`;
   return "";
 }
 
@@ -71,16 +65,12 @@ function toBlocks(output) {
 }
 
 export class Agent {
-  // env: environment variables that may hold API keys (none in the extension edition).
   // ledger: today's token usage across tasks, { used(), add(tokens) }, for the daily limit.
-  constructor({ emit, askPermission, onHistory = () => {}, env = {}, ledger = null }) {
+  constructor({ emit, askPermission, onHistory = () => {}, ledger = null }) {
     this.ledger = ledger;
     this.limiter = new RateLimiter();
     // Connected by the host before the first task.
     this.browser = null;
-    // The desktop tool and its definition ({ tool, def }), local edition only.
-    this.desktop = null;
-    this.env = env;
     this.emit = emit;
     this.askPermission = askPermission;
     // Called whenever the history changes, so the conversation can be saved.
@@ -88,7 +78,7 @@ export class Agent {
     this.messages = [];
     this.sessionOrigins = new Set();
     // Safety checks bill the same account, so their tokens count toward the limits too.
-    this.guard = new Guard({ env, onUsage: (tokens) => this.#countTokens(tokens) });
+    this.guard = new Guard({ onUsage: (tokens) => this.#countTokens(tokens) });
     this.taskTokens = 0;
     this.abortController = null;
     this.usage = { input: 0, cachedInput: 0, output: 0 };
@@ -128,7 +118,7 @@ export class Agent {
     if (!provider) throw new Error(`Unknown provider ${config.provider}`);
     const model = config.models[config.provider];
     if (!model) throw new Error(`Pick a ${config.provider} model in Settings.`);
-    const apiKey = apiKeyFor(config, config.provider, this.env);
+    const apiKey = apiKeyFor(config, config.provider);
     if (config.provider !== "ollama" && !apiKey) throw new Error(`Add a ${config.provider} API key in Settings.`);
     const limits = config.limits;
     if (limits.dailyTokens && this.ledger && (await this.ledger.used()) >= limits.dailyTokens) {
@@ -146,8 +136,7 @@ export class Agent {
       content: [{ type: "text", text: `${userText}\n\n<current_tab id="${page.id}" title="${page.title}" url="${page.url.slice(0, 300)}" />` }],
     });
 
-    const browserTools = config.developerTools ? BROWSER_TOOL_DEFS : BROWSER_TOOL_DEFS.filter((t) => !DEVELOPER_TOOLS.has(t.name));
-    const tools = config.desktopControl && this.desktop ? [...browserTools, this.desktop.def] : browserTools;
+    const tools = BROWSER_TOOL_DEFS;
     this.taskTokens = 0;
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -268,15 +257,12 @@ export class Agent {
       this.emit({ type: "tool_call", id: call.id, name: call.name, input: call.input });
       try {
         if (call.input?.__invalid_json !== undefined) throw new Error("Tool arguments were not valid JSON.");
-        if (DEVELOPER_TOOLS.has(call.name) && !config.developerTools) throw new Error(`${call.name} is turned off in Settings.`);
         await this.limiter.take("action", config.limits.actionsPerMinute, signal, (secs) =>
           this.emit({ type: "notice", text: `Pausing ${secs}s to stay under your limit of ${config.limits.actionsPerMinute} browser actions per minute.` }),
         );
         if (signal.aborted) throw new Error("Cancelled by the user.");
         await this.#authorize(call, config, signal);
-        let output = toBlocks(
-          call.name === "desktop" ? await this.desktop.tool.run(call.input) : await this.browser.run(call.name, call.input),
-        );
+        let output = toBlocks(await this.browser.run(call.name, call.input));
         if (guarded) {
           const warning = await this.guard.scanContent({ config, name: call.name, output, signal });
           if (warning) {
@@ -342,17 +328,15 @@ export class Agent {
 
   async #checkSensitive(call, config) {
     if (call.name === "navigate" || call.name === "tabs" || !isStateChanging(call.name, call.input)) return;
-    if (call.name !== "desktop") {
-      const url = await this.browser.currentUrl();
-      if (config.confirmSensitiveSites && isSensitiveSite(url, config.sensitiveSites)) {
-        const site = new URL(url).hostname;
-        const decision = await this.askPermission({
-          text: `${site} is a sensitive site (banking, payments, passwords, or account security). Allow ${call.name} ${describeInput(call.name, call.input)}?`,
-          allowAlways: false,
-        });
-        if (decision === "deny") throw new Error(`The user declined acting on ${site}.`);
-        return;
-      }
+    const url = await this.browser.currentUrl();
+    if (config.confirmSensitiveSites && isSensitiveSite(url, config.sensitiveSites)) {
+      const site = new URL(url).hostname;
+      const decision = await this.askPermission({
+        text: `${site} is a sensitive site (banking, payments, passwords, or account security). Allow ${call.name} ${describeInput(call.name, call.input)}?`,
+        allowAlways: false,
+      });
+      if (decision === "deny") throw new Error(`The user declined acting on ${site}.`);
+      return;
     }
     // Typing, single keys (a password can be typed a key at a time) and pasting all count.
     const typing = (call.name === "browser" && ["type", "key"].includes(call.input.action)) || call.name === "form_input";
@@ -363,7 +347,6 @@ export class Agent {
   }
 
   async #checkSite(call, config) {
-    if (call.name === "desktop") return;
     const origin = originForToolCall(call.name, call.input, await this.browser.currentUrl());
     if (!origin || !/^https?:/.test(origin)) return;
     if (this.sessionOrigins.has(origin) || config.approvedOrigins.includes(origin)) return;

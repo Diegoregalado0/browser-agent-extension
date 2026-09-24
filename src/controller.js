@@ -6,25 +6,19 @@ import { today } from "./limits.js";
 
 const CONNECTION_TEST_TIMEOUT_MS = 15000;
 
-// The conversation behind every UI: runs tasks, keeps the saved session in step, applies
-// Ghost mode, and answers the UI's messages. Both editions use it; the host supplies
-// what differs between them:
-//   env                   environment variables that may hold API keys ({} in the extension)
+// The session behind the panel: runs tasks, keeps the saved session in step, applies
+// Ghost mode, and answers the UI's messages. The host supplies storage and the browser:
 //   loadConfig/saveConfig settings storage (async)
 //   sessions              { save, list, load, remove, removeAll } (async)
-//   log(event)            activity log sink, optional; clearLog(), logBytes() with it
-//   dataLocation          where data is kept, shown in Settings
-//   ensureBrowser(agent)  connects agent.browser (and agent.desktop locally)
-//   desktop               { status(), requestAccess() } locally, null in the extension
+//   ensureBrowser(agent)  connects agent.browser
 //   loadUsage/saveUsage   today's token count, { day, tokens }, for the daily limit
-//   defaults              the edition's changes to the default settings
 export function createController(host) {
   const clients = new Set();
   let pendingPermission = null;
   // The saved conversation the agent's history belongs to: { id, title, created }, or
   // null until the first request of a new conversation is saved.
   let session = null;
-  // Ghost mode saves nothing: no session and no activity log entries. It is on when the
+  // Ghost mode saves nothing. It is on when the
   // user switches it on, and forced on while any incognito client is connected. A
   // conversation that starts as a ghost stays one until a new conversation begins, so it
   // is never saved later, even after the lock lifts.
@@ -39,20 +33,14 @@ export function createController(host) {
     conversationGhost = ghostActive();
   });
 
-  const record = (event) => {
-    if (!unsaved()) host.log?.(event);
-  };
-
   // The config as the UI sees it: no keys, and the effective Ghost mode state.
   const clientConfig = (config) => ({
-    ...publicConfig(config, host.env),
+    ...publicConfig(config),
     ghostMode: unsaved(),
     ghostLocked: ghostLocked(),
-    edition: host.edition,
   });
 
   const broadcast = (event) => {
-    record(event);
     for (const client of clients) client.send(event);
   };
 
@@ -106,7 +94,6 @@ export function createController(host) {
   };
 
   const agent = new Agent({
-    env: host.env,
     ledger,
     emit: broadcast,
     onHistory: () => persistSession(),
@@ -121,7 +108,6 @@ export function createController(host) {
     if (!pendingPermission) return;
     const { resolve, origin } = pendingPermission;
     pendingPermission = null;
-    record({ type: "permission_answer", decision });
     if (decision === "always" && origin) {
       const config = await host.loadConfig();
       if (!config.approvedOrigins.includes(origin)) config.approvedOrigins.push(origin);
@@ -131,8 +117,6 @@ export function createController(host) {
     broadcast({ type: "permission_closed" });
     resolve(decision);
   }
-
-  const desktopStatus = async () => (host.desktop ? host.desktop.status().catch((e) => ({ error: e.message })) : null);
 
   async function handle(client, msg) {
     await ready;
@@ -151,12 +135,10 @@ export function createController(host) {
         if (agent.messages.length) {
           reply({ type: "conversation", id: session?.id ?? null, title: session?.title ?? null, transcript: transcriptOf(agent.messages) });
         }
-        if (host.desktop) reply({ type: "desktop_status", status: await desktopStatus() });
         return;
       }
       case "run": {
         if (agent.running) return reply({ type: "error", text: "A task is already running." });
-        record({ type: "task", text: String(msg.text) });
         try {
           await host.ensureBrowser(agent);
           await agent.run(String(msg.text), await host.loadConfig());
@@ -212,21 +194,15 @@ export function createController(host) {
         clearConversation();
         return;
       }
-      case "clear_activity_log":
-        await host.clearLog?.();
-        reply({ type: "activity_log_cleared" });
-        return;
       case "data_info":
         reply({
           type: "data_info",
-          home: host.dataLocation,
           sessions: (await host.sessions.list()).length,
-          activityBytes: host.logBytes ? await host.logBytes() : null,
           tokensToday: await ledger.used(),
         });
         return;
       case "reset_config": {
-        const config = resetConfig(await host.loadConfig(), host.defaults);
+        const config = resetConfig(await host.loadConfig());
         await host.saveConfig(config);
         broadcastConfig(config);
         reply({ type: "config_reset" });
@@ -240,7 +216,7 @@ export function createController(host) {
         if (msg.key) config.keys[msg.provider] = String(msg.key).trim();
         if (msg.provider === "openai" && typeof msg.baseUrl === "string") config.openaiBaseUrl = msg.baseUrl.trim();
         if (msg.provider === "ollama" && msg.host) config.ollamaHost = String(msg.host).trim();
-        const apiKey = apiKeyFor(config, msg.provider, host.env);
+        const apiKey = apiKeyFor(config, msg.provider);
         const result = (ok, text) => reply({ type: "provider_test", provider: msg.provider, ok, text });
         if (msg.provider !== "ollama" && !apiKey) return result(false, "No key to test. Paste a key first.");
         const started = Date.now();
@@ -276,7 +252,7 @@ export function createController(host) {
       case "list_models": {
         const config = await host.loadConfig();
         const provider = providers[msg.provider];
-        const apiKey = apiKeyFor(config, msg.provider, host.env);
+        const apiKey = apiKeyFor(config, msg.provider);
         if (msg.provider !== "ollama" && !apiKey) {
           reply({ type: "models", provider: msg.provider, models: [], error: `Save a ${msg.provider} API key to load its models.` });
           return;
@@ -289,28 +265,11 @@ export function createController(host) {
         }
         return;
       }
-      case "desktop_status":
-        if (host.desktop) reply({ type: "desktop_status", status: await desktopStatus() });
-        return;
-      case "request_desktop_access":
-        if (!host.desktop) return;
-        await host.desktop.requestAccess().catch(() => {});
-        reply({ type: "desktop_status", status: await desktopStatus() });
-        return;
-      case "open_browser":
-        try {
-          await host.ensureBrowser(agent);
-          await agent.browser.bringToFront();
-        } catch (err) {
-          reply({ type: "error", text: err.message });
-        }
-        return;
     }
   }
 
   return {
     agent,
-    ensureBrowser: () => host.ensureBrowser(agent),
     // Re-reads settings that changed outside this controller and updates every UI.
     refreshConfig: async () => broadcastConfig(await host.loadConfig()),
     // client: { send(event) }. Returns the function that takes the client's messages.

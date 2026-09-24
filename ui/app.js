@@ -2,19 +2,11 @@ import { createSettings } from "./settings.js";
 
 const $ = (id) => document.getElementById(id);
 const log = $("log");
-const params = new URLSearchParams(location.search);
-const token = params.get("t");
-// The extension edition hosts the controller in this page and provides agentHost; the
-// local edition reaches it over a WebSocket.
+// The side panel page hosts the controller and provides agentHost (extension/sidepanel-main.js).
 const host = globalThis.agentHost;
 const GHOST_TEXT = "This session will not be saved";
 const GHOST_LOCKED_TEXT = "Ghost mode is on during incognito mode";
-// Inside the browser's side panel the "Browser" button has nothing to bring forward.
-if (host || params.get("embed") === "sidebar") document.documentElement.classList.add("in-sidebar");
-// Set by the side panel in an incognito window, where Ghost mode is locked on.
-const incognito = host ? host.incognito : params.get("incognito") === "1";
 
-let ws;
 let link = null;
 let config = null;
 let running = false;
@@ -81,7 +73,7 @@ function onboarding() {
 }
 
 function emptyState() {
-  if (config && config.edition === "extension" && !providerReady()) return onboarding();
+  if (config && !providerReady()) return onboarding();
   const ghost = config?.ghostMode;
   const box = el("div", "empty");
   if (ghost) box.append(icon("ghost"));
@@ -111,7 +103,7 @@ function send(msg) {
 }
 
 function summarize(name, input) {
-  if (name === "browser" || name === "desktop") {
+  if (name === "browser") {
     const target = input.ref || (input.coordinate ? `(${input.coordinate.join(", ")})` : "");
     const text = input.text ? ` "${input.text.slice(0, 40)}"` : "";
     return `${input.action} ${target}${text}${input.scroll_direction ? " " + input.scroll_direction : ""}`.trim();
@@ -120,10 +112,7 @@ function summarize(name, input) {
   if (name === "find") return input.query;
   if (name === "form_input") return `${input.ref} = ${JSON.stringify(input.value)}`.slice(0, 60);
   if (name === "tabs") return [input.action, input.tab_id, input.url].filter(Boolean).join(" ");
-  if (name === "javascript_exec") return (input.code || "").slice(0, 60);
   if (name === "read_page") return input.filter || "all";
-  if (name === "network_requests") return input.request_id ? `#${input.request_id}` : [input.type, input.url_contains, input.failed_only && "failed"].filter(Boolean).join(" ");
-  if (name === "edit_html") return `${input.ref || input.selector || ""}${input.html === undefined ? " (read)" : ` ${input.mode || "outer"}`}`;
   return "";
 }
 
@@ -211,7 +200,6 @@ function setRunning(value) {
 
 function renderHeader() {
   if (!config) return;
-  document.documentElement.dataset.edition = config.edition;
   $("model").textContent = config.models[config.provider] || "No model selected";
   const ghost = Boolean(config.ghostMode);
   document.documentElement.classList.toggle("ghost", ghost);
@@ -319,8 +307,7 @@ function describeAction(name, input) {
       return "Opening page…";
     }
   }
-  if (name === "browser" || name === "desktop") {
-    const where = name === "desktop" ? " (desktop)" : "";
+  if (name === "browser") {
     const map = {
       screenshot: "Taking a screenshot",
       left_click: `Clicking${target}`,
@@ -332,12 +319,9 @@ function describeAction(name, input) {
       key: `Pressing ${input.text || ""}`,
       scroll: `Scrolling ${input.scroll_direction || "down"}`,
       left_click_drag: "Dragging",
-      drag: "Dragging",
-      move: "Moving the mouse",
       wait: `Waiting ${input.duration ?? 2}s`,
-      focus_browser: "Focusing the browser",
     };
-    return `${map[input.action] || input.action}${where}…`;
+    return `${map[input.action] || input.action}…`;
   }
   return (
     {
@@ -345,9 +329,6 @@ function describeAction(name, input) {
       find: `Finding "${input.query || ""}"…`,
       form_input: `Filling${target}…`,
       get_page_text: "Reading the page text…",
-      javascript_exec: "Running JavaScript…",
-      network_requests: "Checking network requests…",
-      edit_html: input.html === undefined ? "Reading element HTML…" : "Editing the page…",
       tabs: `${{ list: "Listing", create: "Opening", switch: "Switching", close: "Closing" }[input.action] || "Managing"} tabs…`,
     }[name] || `Running ${name}…`
   );
@@ -521,20 +502,9 @@ function receive(msg) {
 }
 
 function connect() {
-  if (host) {
-    link = host.connect(receive);
-    send({ type: "hello", incognito });
-    return;
-  }
-  ws = new WebSocket(`ws://${location.host}/ws?t=${token}`);
-  link = { send: (msg) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(msg)) };
-  ws.onopen = () => send({ type: "hello", incognito });
-  ws.onmessage = (e) => receive(JSON.parse(e.data));
-  ws.onclose = () => {
-    $("dot").className = "dot";
-    $("model").textContent = "disconnected, retrying…";
-    setTimeout(connect, 1500);
-  };
+  link = host.connect(receive);
+  // In an incognito window Ghost mode is locked on.
+  send({ type: "hello", incognito: host.incognito });
 }
 
 $("composer").addEventListener("submit", (e) => {
@@ -606,10 +576,6 @@ document.addEventListener("keydown", (e) => {
   else if (settings.isOpen) settings.close();
 });
 
-$("show-browser").onclick = () => {
-  closeMenu();
-  send({ type: "open_browser" });
-};
 $("close-settings").onclick = () => settings.close();
 
 resetLog();

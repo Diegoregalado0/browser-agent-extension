@@ -5,8 +5,8 @@ const THINKING_MODEL = /^claude-(opus-(4-[678]|5)|sonnet-(4-6|5)|fable|mythos)/;
 // Models the "default" server-side refusal fallback is documented for.
 const FALLBACK_MODEL = /^claude-(opus-5$|fable-5-1)/;
 
-// In the extension edition the user's own key calls the API from their browser, which
-// the SDK allows only with this opt-in.
+// The user's own key calls the API from their browser, which the SDK allows only with
+// this opt-in.
 function createClient({ apiKey }) {
   return new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
 }

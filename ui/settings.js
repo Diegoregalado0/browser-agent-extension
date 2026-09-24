@@ -65,11 +65,7 @@ export function createSettings({ $, el, icon, send }) {
     sheet.classList.add("page-open");
     $("settings-title").textContent = sheet.querySelector(`.settings-page[data-page="${name}"]`).dataset.title;
     sheet.querySelector(".settings-pages").scrollTop = 0;
-    if (name === "data") send({ type: "data_info" });
-    if (name === "safety") {
-      send({ type: "desktop_status" });
-      send({ type: "data_info" });
-    }
+    if (name === "data" || name === "safety") send({ type: "data_info" });
   }
 
   function showNav() {
@@ -165,9 +161,6 @@ export function createSettings({ $, el, icon, send }) {
     send({ type: "set_ghost", on: $("ghostMode").checked });
   });
 
-  $("grant-desktop").onclick = () => send({ type: "request_desktop_access" });
-  $("settings-show-browser").onclick = () => send({ type: "open_browser" });
-
   $("reset-settings").onclick = (e) =>
     confirmInline(e.currentTarget, {
       question: "Reset all settings?",
@@ -183,12 +176,6 @@ export function createSettings({ $, el, icon, send }) {
         toast("Deleted all sessions");
         send({ type: "data_info" });
       },
-    });
-  $("clear-activity").onclick = (e) =>
-    confirmInline(e.currentTarget, {
-      question: "Clear the activity log?",
-      confirmLabel: "Clear",
-      onConfirm: () => send({ type: "clear_activity_log" }),
     });
 
   // Provider cards: key status, replace or remove the key, endpoints, connection test.
@@ -245,9 +232,7 @@ export function createSettings({ $, el, icon, send }) {
       host.dataset.bind = "ollamaHost";
       host.addEventListener("change", () => save({ ollamaHost: host.value.trim() || "http://127.0.0.1:11434" }));
       card.append(field("Host", host, "Run ollama serve first. Use a model that supports tools, and a vision model to read screenshots."));
-      const origins = el("p", "field-note", "Start Ollama with OLLAMA_ORIGINS=chrome-extension://* so the panel is allowed to reach it.");
-      origins.dataset.extensionOnly = "";
-      card.append(origins);
+      card.append(el("p", "field-note", "Start Ollama with OLLAMA_ORIGINS=chrome-extension://* so the panel is allowed to reach it."));
       const ctx = Object.assign(el("input"), { type: "number", min: 4096, step: 1024 });
       ctx.classList.add("narrow-input");
       ctx.dataset.bind = "ollamaContext";
@@ -302,7 +287,7 @@ export function createSettings({ $, el, icon, send }) {
       if (info) {
         status.className = `pc-status ${info.source}`;
         status.textContent =
-          info.source === "saved" ? `Saved · ${info.mask}` : info.source === "env" ? `From ${info.env} · ${info.mask}` : "No key";
+          info.source === "saved" ? `Saved · ${info.mask}` : "No key";
         card.querySelector(".pc-remove").hidden = info.source !== "saved";
       } else status.textContent = "";
       for (const input of card.querySelectorAll("[data-bind]")) {
@@ -360,8 +345,6 @@ export function createSettings({ $, el, icon, send }) {
     }
   }
 
-  const formatBytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} bytes`);
-  const tildePath = (home) => home.replace(/^\/Users\/[^/]+/, "~");
 
   return {
     // Opens the sheet, on a given page when named. options.onBack replaces going back to
@@ -394,29 +377,13 @@ export function createSettings({ $, el, icon, send }) {
         result.className = `pc-result ${msg.ok ? "ok" : "error"}`;
         result.replaceChildren(icon(msg.ok ? "check" : "alert"), el("span", null, msg.text));
       },
-      desktop_status(msg) {
-        const s = msg.status;
-        $("desktop-status").textContent = s.error
-          ? s.error
-          : `Accessibility ${s.accessibility ? "granted" : "missing"}, Screen Recording ${s.screenRecording ? "granted" : "missing"}.` +
-            (s.accessibility && s.screenRecording ? "" : " Grant both to the app that runs browser-agent, then restart it.");
-        $("grant-desktop").hidden = Boolean(s.accessibility && s.screenRecording);
-      },
       data_info(msg) {
         $("tokens-today").textContent = `Used today: ${msg.tokensToday.toLocaleString()} tokens.`;
         $("sessions-count").textContent = `${msg.sessions} saved session${msg.sessions === 1 ? "" : "s"}`;
-        $("activity-size").textContent = msg.activityBytes ? formatBytes(msg.activityBytes) : "empty";
-        for (const node of sheet.querySelectorAll("[data-path]")) {
-          node.textContent = tildePath(msg.home) + (node.dataset.path ? `/${node.dataset.path}` : "");
-        }
       },
       config_reset() {
         pendingToast = null;
         toast("Settings reset to defaults");
-      },
-      activity_log_cleared() {
-        toast("Activity log cleared");
-        send({ type: "data_info" });
       },
     },
     toast,

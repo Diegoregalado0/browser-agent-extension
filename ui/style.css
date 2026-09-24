@@ -35,6 +35,8 @@
   }
 }
 * { box-sizing: border-box; }
+/* The hidden attribute always hides, even where a rule sets display. */
+[hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body {
   display: flex;
@@ -133,12 +135,11 @@ details.steps details.thinking summary { font-style: italic; }
 .msg.assistant code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--user); padding: 1px 4px; border-radius: 4px; }
 .msg.assistant a { color: var(--accent); }
 
-/* Side panel layout: narrow, so tighten spacing and drop the Browser button. */
-.in-sidebar #show-browser { display: none !important; }
-.in-sidebar header { padding: 4px 6px 4px 10px; }
-.in-sidebar #log { padding: 10px; }
-.in-sidebar #composer { padding: 8px 10px; }
-.in-sidebar .msg.user { max-width: 95%; }
+/* The side panel is narrow, so spacing is tight. */
+header { padding: 4px 6px 4px 10px; }
+#log { padding: 10px; }
+#composer { padding: 8px 10px; }
+.msg.user { max-width: 95%; }
 
 /* Side menu: settings sections on top at their natural height (about a fifth of a
    typical panel), sessions filling the rest. New session and search stay in place while
@@ -329,10 +330,6 @@ input.switch:checked::after { transform: translateX(16px); }
 .toast.error { background: var(--error); color: #fff; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 6px); } }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
-
-/* Options that exist in only one edition. */
-:root[data-edition="extension"] [data-local-only],
-:root:not([data-edition="extension"]) [data-extension-only] { display: none !important; }
 
 .onboarding { max-width: 320px; }
 .onboarding h2 { margin: 0 0 8px; font-size: 17px; color: var(--fg); }

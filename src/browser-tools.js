@@ -7,20 +7,23 @@ import {
   youtubeAdSkipperScript,
   adOverlayRemoverScript,
   hitTestScript,
-  resolveElementScript,
+  viewportScript,
+  readyStateScript,
+  clickScript,
+  hoverScript,
+  dragScript,
+  typeScript,
+  keysScript,
+  scrollScript,
 } from "./page-scripts.js";
 import { sleep } from "./limits.js";
-
-const AD_SKIPPER_SOURCE = `(${youtubeAdSkipperScript.toString()})();(${adOverlayRemoverScript.toString()})()`;
 
 // Screenshots are scaled to at most this width; coordinates the model sends back are in
 // screenshot pixels and are mapped to CSS pixels before input is dispatched.
 const SCREENSHOT_MAX_WIDTH = 1280;
 const PAGE_OUTLINE_MAX_CHARS = 40000;
 const PAGE_TEXT_MAX_CHARS = 60000;
-const NETWORK_LOG_MAX_ENTRIES = 500;
-const NETWORK_BODY_MAX_CHARS = 8000;
-const ELEMENT_HTML_MAX_CHARS = 20000;
+const LOAD_TIMEOUT_MS = 20000;
 
 export const BROWSER_TOOL_DEFS = [
   {
@@ -93,47 +96,6 @@ export const BROWSER_TOOL_DEFS = [
     input_schema: { type: "object", properties: {} },
   },
   {
-    name: "javascript_exec",
-    description:
-      "Evaluate JavaScript in the current page's main world and return the JSON-serialized result. The code is an " +
-      "expression; wrap statements in an IIFE. Promises are awaited.",
-    input_schema: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
-  },
-  {
-    name: "network_requests",
-    description:
-      "List recent network requests of the current tab, newest last: method, status, resource type, duration, size, URL. " +
-      "For debugging pages (failed API calls, slow or missing resources). Recording starts when the agent first uses a " +
-      "tab, so reload to capture a page load. Pass request_id for one request's headers and response body.",
-    input_schema: {
-      type: "object",
-      properties: {
-        url_contains: { type: "string", description: "Only requests whose URL contains this text" },
-        type: { type: "string", description: "Only this resource type, e.g. Fetch, XHR, Document, Script, Image" },
-        failed_only: { type: "boolean", description: "Only failed requests and HTTP status 400 or higher" },
-        limit: { type: "number", description: "Most recent requests to list (default 40, max 200)" },
-        request_id: { type: "string", description: "Request number from the list, for full details" },
-        clear: { type: "boolean", description: "Clear the recorded requests for this tab" },
-      },
-    },
-  },
-  {
-    name: "edit_html",
-    description:
-      "Read or replace an element's HTML in the current page, by ref from read_page/find or by CSS selector. Omit html " +
-      "to get the element's current HTML. mode 'outer' (default) replaces the element itself, 'inner' its contents. " +
-      "Edits change only this page view and are lost on reload.",
-    input_schema: {
-      type: "object",
-      properties: {
-        ref: { type: "string" },
-        selector: { type: "string", description: "CSS selector, when the element has no ref" },
-        html: { type: "string", description: "New HTML; omit to read" },
-        mode: { type: "string", enum: ["outer", "inner"] },
-      },
-    },
-  },
-  {
     name: "tabs",
     description: "List, open, switch to, or close tabs in the agent browser. Switching makes that tab the target of all page tools.",
     input_schema: {
@@ -153,33 +115,8 @@ function shortUrl(url) {
   return url.length > 200 ? url.slice(0, 200) + "…" : url;
 }
 
-function formatBytes(n) {
-  if (n === undefined) return "";
-  return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : n >= 1024 ? `${(n / 1024).toFixed(1)}kB` : `${n}B`;
-}
-
-function formatHeaders(headers = {}) {
-  return Object.entries(headers)
-    .map(([k, v]) => `  ${k}: ${String(v).slice(0, 300)}`)
-    .join("\n");
-}
-
 function normalizeUrl(url) {
   return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
-}
-
-function jpegSize(base64) {
-  const buf = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-  const u16 = (i) => (buf[i] << 8) | buf[i + 1];
-  let i = 2;
-  while (i < buf.length) {
-    if (buf[i] !== 0xff) return null;
-    const marker = buf[i + 1];
-    const len = u16(i + 2);
-    if (marker >= 0xc0 && marker <= 0xc3) return { height: u16(i + 5), width: u16(i + 7) };
-    i += 2 + len;
-  }
-  return null;
 }
 
 const MODIFIER_BITS = { alt: 1, option: 1, ctrl: 2, control: 2, meta: 4, cmd: 4, command: 4, super: 4, shift: 8 };
@@ -213,9 +150,6 @@ const NAMED_KEYS = {
 };
 for (let i = 1; i <= 12; i++) NAMED_KEYS[`f${i}`] = { key: `F${i}`, code: `F${i}`, keyCode: 111 + i };
 
-// Editing shortcuts need an explicit editor command; synthetic key events alone don't trigger them.
-const EDIT_COMMANDS = { a: "selectAll", c: "copy", v: "paste", x: "cut", z: "undo" };
-
 function describeKey(token) {
   const parts = token.split("+");
   const base = parts.pop();
@@ -229,15 +163,12 @@ function describeKey(token) {
     def = { key: base, code, keyCode: upper.charCodeAt(0), text: base };
   } else throw new Error(`Unknown key "${base}"`);
 
-  const commandModifier = modifiers & (2 | 4);
-  if (commandModifier) delete def.text;
-  const command = commandModifier ? EDIT_COMMANDS[base.toLowerCase()] : undefined;
-  return { def, modifiers, commands: command ? [command] : undefined };
+  if (modifiers & (2 | 4)) delete def.text;
+  return { ...def, modifiers };
 }
 
 export class Browser {
-  // transport: how pages are reached (CdpTransport locally, the chrome.debugger transport
-  // in the extension edition). Tab ids come from the transport.
+  // transport: ScriptingTransport (chrome.scripting and chrome.tabs). Tab ids come from it.
   constructor(transport) {
     this.transport = transport;
     // While a task runs with highlighting on, its current tab sits in an "Agent" tab group.
@@ -247,81 +178,7 @@ export class Browser {
     this.taskTabs = new Set();
     this.currentId = null;
     this.skipYoutubeAds = false;
-    this.attached = new Set();
-    this.adSkipperIds = new Map();
-    // Network requests per attached tab: { since, seq, entries, byRequestId }.
-    this.networkLogs = new Map();
-    transport.onAttach = (id) => this.#prepareTab(id);
-    transport.onEvent = (id, method, params) => this.#onNetworkEvent(id, method, params);
-    transport.onDetach = (id) => {
-      this.attached.delete(id);
-      this.adSkipperIds.delete(id);
-      this.networkLogs.delete(id);
-    };
-  }
-
-  // Runs once each time the transport attaches to a tab.
-  async #prepareTab(id) {
-    this.attached.add(id);
-    this.networkLogs.set(id, { since: Date.now(), seq: 0, entries: [], byRequestId: new Map() });
-    await this.transport.send(id, "Network.enable").catch(() => {});
-    if (this.skipYoutubeAds) await this.#installAdSkipper(id);
-  }
-
-  #onNetworkEvent(id, method, p) {
-    const log = this.networkLogs.get(id);
-    if (!log) return;
-    const entry = log.byRequestId.get(p.requestId);
-    switch (method) {
-      case "Network.requestWillBeSent": {
-        // A redirect reuses the request id: finish the previous hop and start a new entry.
-        if (entry && p.redirectResponse) {
-          entry.status = p.redirectResponse.status;
-          entry.statusText = p.redirectResponse.statusText;
-          entry.responseHeaders = p.redirectResponse.headers;
-          entry.duration = Math.round((p.timestamp - entry.timestamp) * 1000);
-          entry.redirected = true;
-        }
-        const e = {
-          id: String(++log.seq),
-          requestId: p.requestId,
-          url: p.request.url,
-          method: p.request.method,
-          type: p.type || "Other",
-          time: p.wallTime * 1000,
-          timestamp: p.timestamp,
-          requestHeaders: p.request.headers,
-          postData: p.request.postData?.slice(0, 2000),
-        };
-        log.entries.push(e);
-        log.byRequestId.set(p.requestId, e);
-        if (log.entries.length > NETWORK_LOG_MAX_ENTRIES) {
-          const dropped = log.entries.shift();
-          if (log.byRequestId.get(dropped.requestId) === dropped) log.byRequestId.delete(dropped.requestId);
-        }
-        return;
-      }
-      case "Network.responseReceived":
-        if (!entry) return;
-        entry.status = p.response.status;
-        entry.statusText = p.response.statusText;
-        entry.mimeType = p.response.mimeType;
-        entry.responseHeaders = p.response.headers;
-        entry.fromCache = p.response.fromDiskCache || p.response.fromServiceWorker || undefined;
-        if (p.type) entry.type = p.type;
-        return;
-      case "Network.loadingFinished":
-        if (!entry) return;
-        entry.size = p.encodedDataLength;
-        entry.duration = Math.round((p.timestamp - entry.timestamp) * 1000);
-        entry.done = true;
-        return;
-      case "Network.loadingFailed":
-        if (!entry) return;
-        entry.error = p.blockedReason ? `blocked: ${p.blockedReason}` : p.canceled ? "canceled" : p.errorText;
-        entry.duration = Math.round((p.timestamp - entry.timestamp) * 1000);
-        entry.done = true;
-    }
+    this.cssPerPixel = null;
   }
 
   // Every change of the tab the tools act on goes through here, so the highlight follows.
@@ -357,16 +214,6 @@ export class Browser {
     return (await this.currentPage()).url;
   }
 
-  async #installAdSkipper(id) {
-    try {
-      // New-document scripts only run once the Page domain is enabled on the session.
-      await this.transport.send(id, "Page.enable");
-      const { identifier } = await this.transport.send(id, "Page.addScriptToEvaluateOnNewDocument", { source: AD_SKIPPER_SOURCE });
-      this.adSkipperIds.set(id, identifier);
-      await this.transport.send(id, "Runtime.evaluate", { expression: AD_SKIPPER_SOURCE });
-    } catch {}
-  }
-
   // Called at the start of every task: tabs from earlier tasks and the user's own tabs
   // become protected, so this task opens new tabs instead of taking them over.
   // Also points the agent at the tab the user is looking at, so "this page" means it,
@@ -380,12 +227,9 @@ export class Browser {
   }
 
   async endTask() {
-    if (this.highlighting) {
-      this.highlighting = false;
-      await this.#highlight();
-    }
-    // The extension edition detaches here, which removes Chrome's debugging banner.
-    await this.transport.release?.();
+    if (!this.highlighting) return;
+    this.highlighting = false;
+    await this.#highlight();
   }
 
   #isBlank(page) {
@@ -395,7 +239,7 @@ export class Browser {
   // Opens a tab for this task as a tab in the current tab's window, next to it, and
   // makes it current.
   async #openTaskTab(url = "about:blank") {
-    this.transport.checkUrl?.(url);
+    this.transport.checkUrl(url);
     const id = await this.transport.openTab({ openerId: this.currentId, url });
     this.#setCurrent(id);
     this.taskTabs.add(id);
@@ -403,51 +247,16 @@ export class Browser {
     return id;
   }
 
-  // Screen rectangle (in points) of the agent's side panel, or null when it is closed.
-  // Assumes Chrome's default right-side placement.
-  async sidebarRect() {
-    try {
-      const w = await this.evaluate("({ x: screenX, y: screenY, ow: outerWidth, oh: outerHeight, iw: innerWidth, ih: innerHeight })");
-      if (w.ow - w.iw < 120) return null;
-      return { left: w.x + w.iw, right: w.x + w.ow, top: w.y + (w.oh - w.ih), bottom: w.y + w.oh };
-    } catch {
-      return null;
-    }
-  }
-
-  // Turns the YouTube ad skipper on or off for tabs the agent has attached to.
-  async setAdSkipping(enabled) {
+  // Turns the YouTube ad skipper and ad overlay remover on or off. They are injected into
+  // the agent's tab after each page load.
+  setAdSkipping(enabled) {
     this.skipYoutubeAds = enabled;
-    for (const id of this.attached) {
-      const scriptId = this.adSkipperIds.get(id);
-      if (enabled && !scriptId) await this.#installAdSkipper(id);
-      if (!enabled && scriptId) {
-        await this.transport.send(id, "Page.removeScriptToEvaluateOnNewDocument", { identifier: scriptId }).catch(() => {});
-        this.adSkipperIds.delete(id);
-      }
-    }
   }
 
-  async send(method, params = {}) {
+  // Runs a page function from page-scripts.js in the current tab.
+  async callInPage(fn, ...args) {
     const { id } = await this.currentPage();
-    return this.transport.send(id, method, params);
-  }
-
-  async evaluate(expression) {
-    const res = await this.send("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-      userGesture: true,
-    });
-    if (res.exceptionDetails) {
-      throw new Error(res.exceptionDetails.exception?.description || res.exceptionDetails.text);
-    }
-    return res.result.value;
-  }
-
-  callInPage(fn, ...args) {
-    return this.evaluate(`(${fn.toString()})(...${JSON.stringify(args)})`);
+    return this.transport.call(id, fn, args);
   }
 
   async bringToFront() {
@@ -455,47 +264,27 @@ export class Browser {
     await this.transport.activate(id);
   }
 
-  async waitForLoad(timeoutMs = 20000) {
-    const start = Date.now();
-    await sleep(250);
-    while (Date.now() - start < timeoutMs) {
-      try {
-        if ((await this.evaluate("document.readyState")) === "complete") return;
-      } catch {
-        // The execution context is replaced mid-navigation; keep polling.
-      }
-      await sleep(200);
+  async waitForLoad() {
+    const { id } = await this.currentPage();
+    await this.transport.waitForLoad(id, LOAD_TIMEOUT_MS);
+    if (this.skipYoutubeAds) {
+      await this.callInPage(youtubeAdSkipperScript).catch(() => {});
+      await this.callInPage(adOverlayRemoverScript).catch(() => {});
     }
   }
 
+  // After an action that may navigate, waits for any load it started.
   async #settle() {
     await sleep(300);
-    try {
-      if ((await this.evaluate("document.readyState")) !== "complete") await this.waitForLoad();
-    } catch {
-      await this.waitForLoad();
-    }
-  }
-
-  async #viewport() {
-    return this.evaluate(
-      "({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio, x: visualViewport.pageLeft, y: visualViewport.pageTop })",
-    );
+    const state = await this.callInPage(readyStateScript).catch(() => "loading");
+    if (state !== "complete") await this.waitForLoad();
   }
 
   async screenshot() {
-    await this.bringToFront();
-    const vp = await this.#viewport();
-    const width = Math.min(vp.w, SCREENSHOT_MAX_WIDTH);
-    const { data } = await this.send("Page.captureScreenshot", {
-      format: "jpeg",
-      quality: 75,
-      // The output is also multiplied by devicePixelRatio, so divide it back out.
-      clip: { x: vp.x, y: vp.y, width: vp.w, height: vp.h, scale: width / vp.w / vp.dpr },
-    });
-    const size = jpegSize(data) || { width, height: Math.round((vp.h * width) / vp.w) };
-    this.cssPerPixel = vp.w / size.width;
-    return { data, ...size };
+    const { id } = await this.currentPage();
+    const shot = await this.transport.screenshot(id, SCREENSHOT_MAX_WIDTH);
+    this.cssPerPixel = shot.cssPerPixel;
+    return shot;
   }
 
   async #point(input, key = "coordinate") {
@@ -516,37 +305,16 @@ export class Browser {
     const coord = input[key];
     if (!Array.isArray(coord) || coord.length !== 2) throw new Error(`${key} [x, y] or ref is required for ${input.action}`);
     if (!this.cssPerPixel) {
-      const vp = await this.#viewport();
+      const vp = await this.callInPage(viewportScript);
       this.cssPerPixel = vp.w / Math.min(vp.w, SCREENSHOT_MAX_WIDTH);
     }
     return { x: Math.round(coord[0] * this.cssPerPixel), y: Math.round(coord[1] * this.cssPerPixel) };
   }
 
-  #mouse(type, x, y, extra = {}) {
-    return this.send("Input.dispatchMouseEvent", { type, x, y, ...extra });
-  }
-
-  async #click(x, y, { button = "left", count = 1, modifiers = 0 } = {}) {
-    await this.#mouse("mouseMoved", x, y, { modifiers });
-    for (let i = 1; i <= count; i++) {
-      await this.#mouse("mousePressed", x, y, { button, clickCount: i, modifiers });
-      await this.#mouse("mouseReleased", x, y, { button, clickCount: i, modifiers });
-    }
-  }
-
-  async #pressKeys(text) {
-    for (const token of text.trim().split(/\s+/)) {
-      const { def, modifiers, commands } = describeKey(token);
-      const common = { key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, modifiers };
-      await this.send("Input.dispatchKeyEvent", {
-        ...common,
-        type: def.text ? "keyDown" : "rawKeyDown",
-        text: def.text,
-        unmodifiedText: def.text,
-        commands,
-      });
-      await this.send("Input.dispatchKeyEvent", { ...common, type: "keyUp" });
-    }
+  // Runs an input page function and turns its { error } result into an exception.
+  async #input(fn, ...args) {
+    const res = await this.callInPage(fn, ...args);
+    if (res?.error) throw new Error(res.error);
   }
 
   async #pageAction(input) {
@@ -565,48 +333,40 @@ export class Browser {
         const p = await this.#point(input);
         const button = input.action === "right_click" ? "right" : "left";
         const count = { double_click: 2, triple_click: 3 }[input.action] || 1;
-        await this.#click(p.x, p.y, { button, count, modifiers: parseModifiers(input.modifiers) });
+        await this.#input(clickScript, p.x, p.y, button, count, parseModifiers(input.modifiers));
         await this.#settle();
         return `${input.action} at ${input.ref || JSON.stringify(input.coordinate)}`;
       }
       case "hover": {
         const p = await this.#point(input);
-        await this.#mouse("mouseMoved", p.x, p.y);
+        await this.#input(hoverScript, p.x, p.y);
         return `Hovered ${input.ref || JSON.stringify(input.coordinate)}`;
       }
       case "left_click_drag": {
         const from = await this.#point(input, "start_coordinate");
         const to = await this.#point(input);
-        await this.#mouse("mouseMoved", from.x, from.y);
-        await this.#mouse("mousePressed", from.x, from.y, { button: "left", clickCount: 1 });
-        for (let i = 1; i <= 10; i++) {
-          const x = from.x + ((to.x - from.x) * i) / 10;
-          const y = from.y + ((to.y - from.y) * i) / 10;
-          await this.#mouse("mouseMoved", x, y, { button: "left", buttons: 1 });
-        }
-        await this.#mouse("mouseReleased", to.x, to.y, { button: "left", clickCount: 1 });
+        await this.#input(dragScript, from.x, from.y, to.x, to.y);
         return "Dragged";
       }
       case "type": {
         if (typeof input.text !== "string") throw new Error("text is required for type");
-        await this.send("Input.insertText", { text: input.text });
+        await this.#input(typeScript, input.text);
         return `Typed ${input.text.length} characters`;
       }
       case "key": {
         if (!input.text) throw new Error("text is required for key");
-        await this.#pressKeys(input.text);
+        await this.#input(keysScript, input.text.trim().split(/\s+/).map(describeKey));
         await this.#settle();
         return `Pressed ${input.text}`;
       }
       case "scroll": {
-        const vp = await this.#viewport();
+        const vp = await this.callInPage(viewportScript);
         const p = input.coordinate || input.ref ? await this.#point(input) : { x: vp.w / 2, y: vp.h / 2 };
         const delta = (input.scroll_amount ?? 3) * 100;
         const dir = input.scroll_direction || "down";
-        await this.#mouse("mouseWheel", p.x, p.y, {
-          deltaX: dir === "left" ? -delta : dir === "right" ? delta : 0,
-          deltaY: dir === "up" ? -delta : dir === "down" ? delta : 0,
-        });
+        const dx = dir === "left" ? -delta : dir === "right" ? delta : 0;
+        const dy = dir === "up" ? -delta : dir === "down" ? delta : 0;
+        await this.#input(scrollScript, p.x, p.y, dx, dy);
         await sleep(250);
         return `Scrolled ${dir}`;
       }
@@ -618,95 +378,6 @@ export class Browser {
       default:
         throw new Error(`Unknown action ${input.action}`);
     }
-  }
-
-  async #networkRequests(input) {
-    // Attaching to the tab starts its recording, so make sure it is attached.
-    await this.send("Runtime.evaluate", { expression: "0" });
-    const log = this.networkLogs.get(this.currentId);
-    if (!log) throw new Error("Network recording is not available for this tab.");
-    if (input.clear) {
-      log.entries = [];
-      log.byRequestId.clear();
-      log.since = Date.now();
-      return "Cleared the recorded requests for this tab.";
-    }
-    if (input.request_id) {
-      const e = log.entries.find((x) => x.id === String(input.request_id).replace(/^#/, ""));
-      if (!e) throw new Error(`No request #${input.request_id} in the recent requests of this tab`);
-      const lines = [
-        `#${e.id} ${e.method} ${e.url}`,
-        `Status: ${e.error ? `failed (${e.error})` : e.status ? `${e.status} ${e.statusText || ""}`.trim() : "pending"}`,
-        `Type: ${e.type}${e.mimeType ? ` (${e.mimeType})` : ""}${e.fromCache ? ", from cache" : ""}`,
-        `Started: ${new Date(e.time).toISOString()}${e.duration !== undefined ? `, took ${e.duration}ms` : ""}${e.size !== undefined ? `, ${formatBytes(e.size)} transferred` : ""}`,
-        "",
-        "Request headers:",
-        formatHeaders(e.requestHeaders),
-      ];
-      if (e.postData) lines.push("", "Request body:", e.postData);
-      if (e.responseHeaders) lines.push("", "Response headers:", formatHeaders(e.responseHeaders));
-      if (e.done && !e.error && !e.redirected) {
-        try {
-          const { body, base64Encoded } = await this.send("Network.getResponseBody", { requestId: e.requestId });
-          const text = base64Encoded ? `[binary, ${formatBytes(Math.round((body.length * 3) / 4))}]` : body;
-          lines.push("", "Response body:", text.length > NETWORK_BODY_MAX_CHARS ? text.slice(0, NETWORK_BODY_MAX_CHARS) + "\n[truncated]" : text);
-        } catch {
-          lines.push("", "Response body: not available (no longer buffered)");
-        }
-      }
-      return lines.join("\n");
-    }
-    const type = input.type?.toLowerCase();
-    const filtered = log.entries.filter(
-      (e) =>
-        (!input.url_contains || e.url.includes(input.url_contains)) &&
-        (!type || e.type.toLowerCase() === type) &&
-        (!input.failed_only || e.error || e.status >= 400),
-    );
-    const limit = Math.min(Math.max(input.limit ?? 40, 1), 200);
-    const shown = filtered.slice(-limit);
-    const since = new Date(log.since).toTimeString().slice(0, 8);
-    const header = `Recorded since ${since}; showing ${shown.length} of ${filtered.length} matching (${log.entries.length} total), newest last.`;
-    if (!shown.length) return `${header}\nNo requests. Reload the page to capture its load.`;
-    const rows = shown.map((e) => {
-      const status = e.error ? `failed(${e.error})` : e.status ?? "pending";
-      const timing = [e.duration !== undefined && `${e.duration}ms`, formatBytes(e.size)].filter(Boolean).join(" ");
-      return `#${e.id} ${e.method} ${status} ${e.type}${timing ? ` ${timing}` : ""} ${shortUrl(e.url)}`;
-    });
-    return `${header}\n${rows.join("\n")}`;
-  }
-
-  async #editHtml(input) {
-    if (!input.ref && !input.selector) throw new Error("ref or selector is required");
-    const found = await this.send("Runtime.evaluate", {
-      expression: `(${resolveElementScript.toString()})(${JSON.stringify(input.ref || null)}, ${JSON.stringify(input.selector || null)})`,
-    });
-    if (found.exceptionDetails) throw new Error(found.exceptionDetails.exception?.description?.replace(/^Error: /, "").split("\n")[0]);
-    const objectId = found.result.objectId;
-    const outerHtml = async (id) => {
-      const res = await this.send("Runtime.callFunctionOn", { objectId: id, functionDeclaration: "function () { return this.outerHTML; }", returnByValue: true });
-      const html = res.result.value || "";
-      return html.length > ELEMENT_HTML_MAX_CHARS ? html.slice(0, ELEMENT_HTML_MAX_CHARS) + "\n[truncated]" : html;
-    };
-    if (input.html === undefined) return outerHtml(objectId);
-
-    // DevTools edits bypass Trusted Types, which make innerHTML assignment throw on many sites.
-    await this.send("DOM.getDocument", { depth: 0 });
-    const setOuter = async (id, html) => {
-      const { nodeId } = await this.send("DOM.requestNode", { objectId: id });
-      await this.send("DOM.setOuterHTML", { nodeId, outerHTML: html });
-    };
-    if (input.mode === "inner") {
-      const marker = await this.send("Runtime.callFunctionOn", {
-        objectId,
-        functionDeclaration: "function () { const m = document.createElement('span'); this.replaceChildren(m); return m; }",
-      });
-      if (input.html) await setOuter(marker.result.objectId, input.html);
-      else await this.send("Runtime.callFunctionOn", { objectId: marker.result.objectId, functionDeclaration: "function () { this.remove(); }" });
-      return `Replaced the contents. The element is now:\n${(await outerHtml(objectId)).slice(0, 2000)}`;
-    }
-    await setOuter(objectId, input.html);
-    return "Replaced the element. Refs inside it no longer work; use read_page or find for new refs.";
   }
 
   async #tabs(input) {
@@ -760,7 +431,7 @@ export class Browser {
       case "navigate": {
         let note = "";
         if (input.url !== "back" && input.url !== "forward") {
-          this.transport.checkUrl?.(normalizeUrl(input.url));
+          this.transport.checkUrl(normalizeUrl(input.url));
           const page = await this.currentPage();
           if (input.new_tab) {
             const id = await this.#openTaskTab();
@@ -774,17 +445,9 @@ export class Browser {
             note = ` (new tab ${id}, because tab ${page.id} was not opened by this task; it is unchanged)`;
           }
         }
-        if (input.url === "back" || input.url === "forward") {
-          const { currentIndex, entries } = await this.send("Page.getNavigationHistory");
-          const entry = entries[currentIndex + (input.url === "back" ? -1 : 1)];
-          if (!entry) throw new Error(`No ${input.url} history entry`);
-          await this.send("Page.navigateToHistoryEntry", { entryId: entry.id });
-        } else {
-          const url = normalizeUrl(input.url);
-          const { id } = await this.currentPage();
-          const errorText = await this.transport.navigate(id, url);
-          if (errorText) throw new Error(`Navigation failed: ${errorText}`);
-        }
+        const { id } = await this.currentPage();
+        if (input.url === "back" || input.url === "forward") await this.transport.history(id, input.url);
+        else await this.transport.navigate(id, normalizeUrl(input.url));
         this.cssPerPixel = null;
         await this.waitForLoad();
         const page = await this.currentPage();
@@ -815,17 +478,8 @@ export class Browser {
         const res = await this.callInPage(pageTextScript, PAGE_TEXT_MAX_CHARS);
         return `URL: ${shortUrl(res.url)}\nTitle: ${res.title}\nSource: <${res.source}>\n\n${res.text}`;
       }
-      case "javascript_exec": {
-        const value = await this.evaluate(input.code);
-        const out = value === undefined ? "undefined" : JSON.stringify(value, null, 2);
-        return out.length > 30000 ? out.slice(0, 30000) + "\n[truncated]" : out;
-      }
       case "tabs":
         return this.#tabs(input);
-      case "network_requests":
-        return this.#networkRequests(input);
-      case "edit_html":
-        return this.#editHtml(input);
       default:
         throw new Error(`Unknown browser tool ${name}`);
     }
@@ -841,10 +495,6 @@ export class Browser {
       }
     } catch {}
     return null;
-  }
-
-  async browserPid() {
-    return this.transport.browserPid?.();
   }
 }
 

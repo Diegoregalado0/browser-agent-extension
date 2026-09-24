@@ -1,5 +1,4 @@
-// How a conversation is stored and shown, shared by the local session files and the
-// extension edition's storage.
+// How a session is stored and shown.
 
 const TRANSCRIPT_RESULT_MAX_CHARS = 4000;
 // The current-tab note the agent appends to each request.
